@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Stable Arcade Tetris</title>
+<style>
+body{
+  margin:0;
+  background:#111;
+  color:#fff;
+  font-family:Arial,sans-serif;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  height:100vh;
+}
+.container{display:flex;gap:20px;position:relative;}
+canvas{background:#000;border:2px solid #555;}
+.panel{width:200px;}
+.panel h2{margin:8px 0 4px;font-size:16px}
+.overlay{
+  position:absolute;inset:0;
+  background:rgba(0,0,0,.85);
+  display:flex;flex-direction:column;
+  justify-content:center;align-items:center;
+  z-index:10;
+}
+.overlay button{padding:10px 26px;font-size:18px;cursor:pointer}
+.controls{
+  position:absolute;
+  bottom:-100px;
+  left:0;right:0;
+  display:flex;
+  justify-content:center;
+  gap:10px;
+}
+.controls button{width:60px;height:60px;font-size:22px}
+</style>
+</head>
+<body>
+
+<div class="container" id="container">
+  <canvas id="tetris" width="300" height="600"></canvas>
+
+  <div class="panel">
+    <h2>점수</h2><div id="score">0</div>
+    <h2>최고</h2><div id="high">0</div>
+    <h2>레벨</h2><div id="level">1</div>
+    <h2>콤보</h2><div id="combo">0</div>
+    <h2>다음</h2>
+    <canvas id="next" width="120" height="120"></canvas>
+  </div>
+
+  <div id="overlay" class="overlay">
+    <h1 id="overlayTitle">TETRIS</h1>
+    <button id="overlayBtn">START</button>
+  </div>
+
+  <div class="controls">
+    <button onclick="move(-1)">◀</button>
+    <button onclick="rotatePiece()">⟳</button>
+    <button onclick="move(1)">▶</button>
+    <button onclick="softDrop()">▼</button>
+    <button onclick="hardDrop()">⤓</button>
+  </div>
+</div>
+
+<script>
+/* ================== 기본 설정 ================== */
+const COLS=10, ROWS=20, BLOCK=30;
+const canvas=document.getElementById('tetris');
+const ctx=canvas.getContext('2d');
+ctx.scale(BLOCK,BLOCK);
+
+const nextCtx=document.getElementById('next').getContext('2d');
+nextCtx.scale(BLOCK,BLOCK);
+
+/* ================== 데이터 ================== */
+const SHAPES=[
+ [],
+ [[1,1,1,1]],
+ [[2,0,0],[2,2,2]],
+ [[0,0,3],[3,3,3]],
+ [[4,4],[4,4]],
+ [[0,5,5],[5,5,0]],
+ [[0,6,0],[6,6,6]],
+ [[7,7,0],[0,7,7]]
+];
+
+const COLORS=[
+ null,'cyan','blue','orange','yellow','green','purple','red'
+];
+
+/* ================== 상태 ================== */
+let arena;
+let animationId=null;
+let lastTime=0, dropCounter=0;
+let running=false, paused=false;
+
+const player={
+  pos:{x:0,y:0},
+  matrix:null,
+  next:null,
+  score:0,
+  level:1,
+  lines:0,
+  combo:0,
+  rotated:false,
+  dropInterval:800
+};
+
+/* ================== 최고점수 ================== */
+let highScore=Number(localStorage.getItem('tetrisHigh'))||0;
+high.innerText=highScore;
+
+/* ================== 유틸 ================== */
+function createMatrix(w,h){
+  return Array.from({length:h},()=>Array(w).fill(0));
+}
+function randomPiece(){
+  return SHAPES[Math.floor(Math.random()*7)+1];
+}
+
+/* ================== 충돌 (안정화) ================== */
+function collide(matrix,pos){
+  for(let y=0;y<matrix.length;y++){
+    for(let x=0;x<matrix[y].length;x++){
+      if(matrix[y][x]){
+        const ay=y+pos.y;
+        const ax=x+pos.x;
+        if(
+          ax<0 || ax>=COLS ||
+          ay>=ROWS ||
+          (ay>=0 && arena[ay][ax])
+        ) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/* ================== 고스트 ================== */
+function getGhostY(){
+  let y=player.pos.y;
+  while(!collide(player.matrix,{x:player.pos.x,y:y+1})) y++;
+  return y;
+}
+
+/* ================== 게임 로직 ================== */
+function merge(){
+  player.matrix.forEach((row,y)=>{
+    row.forEach((v,x)=>{
+      if(v) arena[y+player.pos.y][x+player.pos.x]=v;
+    });
+  });
+}
+
+function rotatePiece(){
+  if(!running||paused) return;
+  const old=player.matrix;
+  const rotated=old[0].map((_,i)=>old.map(r=>r[i]).reverse());
+  player.matrix=rotated;
+  player.rotated=true;
+
+  if(collide(player.matrix,player.pos)){
+    // 벽 킥 간단 처리
+    player.pos.x++;
+    if(collide(player.matrix,player.pos)){
+      player.pos.x-=2;
+      if(collide(player.matrix,player.pos)){
+        player.pos.x++;
+        player.matrix=old;
+        player.rotated=false;
+      }
+    }
+  }
+}
+
+function sweep(){
+  let cleared=0;
+  outer:for(let y=ROWS-1;y>=0;y--){
+    for(let x=0;x<COLS;x++){
+      if(arena[y][x]===0) continue outer;
+    }
+    arena.splice(y,1);
+    arena.unshift(Array(COLS).fill(0));
+    cleared++; y++;
+  }
+
+  if(cleared){
+    player.combo++;
+    const tspin = player.rotated && player.matrix.length===3;
+    let base=[0,100,300,500,800][cleared];
+    let bonus=player.combo*50 + (tspin?400:0);
+    player.score+=(base+bonus)*player.level;
+    player.lines+=cleared;
+  } else {
+    player.combo=0;
+  }
+
+  if(player.lines>=player.level*10){
+    player.level++;
+    player.dropInterval*=0.85;
+  }
+
+  player.rotated=false;
+  updateUI();
+}
+
+function resetPlayer(){
+  player.matrix=player.next||randomPiece();
+  player.next=randomPiece();
+  player.pos.y=-1;
+  player.pos.x=(COLS/2|0)-(player.matrix[0].length/2|0);
+
+  if(collide(player.matrix,player.pos)){
+    endGame();
+  }
+}
+
+function softDrop(){
+  if(!running||paused) return;
+  player.pos.y++;
+  if(collide(player.matrix,player.pos)){
+    player.pos.y--;
+    merge();
+    resetPlayer();
+    sweep();
+  }
+}
+
+function hardDrop(){
+  if(!running||paused) return;
+  player.pos.y=getGhostY();
+  softDrop();
+}
+
+function move(dir){
+  if(!running||paused) return;
+  player.pos.x+=dir;
+  if(collide(player.matrix,player.pos)){
+    player.pos.x-=dir;
+  }
+}
+
+/* ================== 렌더 ================== */
+function drawMatrix(matrix,offset,ghost=false){
+  matrix.forEach((row,y)=>{
+    row.forEach((v,x)=>{
+      if(v){
+        ctx.fillStyle=ghost?'rgba(255,255,255,0.25)':COLORS[v];
+        ctx.fillRect(x+offset.x,y+offset.y,1,1);
+      }
+    });
+  });
+}
+
+function draw(){
+  ctx.fillStyle='#000';
+  ctx.fillRect(0,0,COLS,ROWS);
+  drawMatrix(arena,{x:0,y:0});
+  drawMatrix(player.matrix,{x:player.pos.x,y:getGhostY()},true);
+  drawMatrix(player.matrix,player.pos);
+
+  nextCtx.clearRect(0,0,4,4);
+  drawMatrix(player.next,{x:1,y:1});
+}
+
+/* ================== UI ================== */
+function updateUI(){
+  score.innerText=player.score;
+  level.innerText=player.level;
+  combo.innerText=player.combo;
+}
+
+/* ================== 루프 ================== */
+function update(time=0){
+  if(!running) return;
+  const delta=time-lastTime;
+  lastTime=time;
+  if(!paused){
+    dropCounter+=delta;
+    if(dropCounter>player.dropInterval){
+      softDrop();
+      dropCounter=0;
+    }
+    draw();
+  }
+  animationId=requestAnimationFrame(update);
+}
+
+/* ================== 게임 흐름 ================== */
+function startGame(){
+  if(animationId) cancelAnimationFrame(animationId);
+  arena=createMatrix(COLS,ROWS);
+  Object.assign(player,{
+    score:0,level:1,lines:0,combo:0,
+    dropInterval:800,rotated:false
+  });
+  lastTime=0; dropCounter=0;
+  player.next=randomPiece();
+  resetPlayer();
+  updateUI();
+  overlay.style.display='none';
+  running=true;
+  paused=false;
+  update();
+}
+
+function endGame(){
+  running=false;
+  if(player.score>highScore){
+    highScore=player.score;
+    localStorage.setItem('tetrisHigh',highScore);
+    high.innerText=highScore;
+  }
+  overlayTitle.innerText='GAME OVER';
+  overlayBtn.innerText='RESTART';
+  overlay.style.display='flex';
+}
+
+/* ================== 입력 ================== */
+document.addEventListener('keydown',e=>{
+  if(e.key==='p'||e.key==='P'){paused=!paused;return;}
+  if(e.key==='ArrowLeft') move(-1);
+  if(e.key==='ArrowRight') move(1);
+  if(e.key==='ArrowDown') softDrop();
+  if(e.key==='ArrowUp') rotatePiece();
+  if(e.key===' ') hardDrop();
+});
+
+overlayBtn.onclick=startGame;
+</script>
+</body>
+</html>
